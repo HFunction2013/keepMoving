@@ -1,109 +1,131 @@
 # keepMoving
 
-一个“你必须真的动鼠标”的守夜程序：只要键盘和鼠标在你指定的秒数内一直没有动过，就用
-`NtRaiseHardError` 触发一次 bugcheck，停机码固定为 **0xABCDEF12**。
+A watchdog that actually makes you move the mouse: if the keyboard and mouse
+stay idle for the number of seconds you specify, it raises a bugcheck via
+`NtRaiseHardError` with the stop code fixed at **0xABCDEF12**.
 
-纯用户态、MSVC 编译、CLI 程序、`start` 立即返回不阻塞终端、日志写文件不刷屏，并且
-**不修改系统设置**（不碰屏保、不碰注册表、不碰电源策略），这些约束是设计的硬前提。
+Pure user mode, MSVC-built, CLI, `start` returns immediately without blocking
+your terminal, logs go to a file instead of flooding the console, and — hard
+design constraint — it **changes no system settings** (no screensaver, no
+registry, no power policy).
 
 ```
-keepMoving start 300         # 5 分钟不动键盘鼠标就蓝屏
-keepMoving start 300 --warn  # 到点改弹置顶 MessageBox，点掉后自动撤防
-keepMoving query             # 现在还有多少秒
-keepMoving query --watch     # 每秒刷新一行实时倒计时
-keepMoving stop              # 拆掉定时器
+keepMoving start 300         # bugcheck after 5 minutes of no mouse/keyboard
+keepMoving start 300 --warn  # instead: pop a topmost message box, then disarm
+keepMoving query              # how many seconds are left
+keepMoving query --watch      # refresh a live countdown line every second
+keepMoving stop               # disarm the watchdog
 ```
 
-> **警告**：这是真的蓝屏，不是模拟。触发时未保存的工作会丢失，Windows 会按系统当前的
-> 转储设置写 dump（内存足够时默认可能写 `%SystemRoot%\MEMORY.DMP`），如果开了 BitLocker
-> 可能弹出恢复流程。先 `--dry-run` 跑通确认行为，再上真机。
+> **Warning**: this is a real bugcheck, not a simulation. Unsaved work is
+> lost when it fires, Windows writes a dump per your current dump settings
+> (defaults to `%SystemRoot%\MEMORY.DMP` when memory allows), and BitLocker
+> may trigger a recovery flow. Run `--dry-run` first to confirm the behaviour
+> before pointing it at a real machine.
 
 ---
 
-## 1. 怎么判定“键鼠没有活动”
+## 1. How "no keyboard/mouse activity" is detected
 
-用 `GetLastInputInfo()`，这是 user32 暴露的、专门回答“本会话最后一次键鼠输入是什么时候”
-的 API。它返回一个 tick 值，程序每 50 ms 取一次，用 `GetTickCount64()` 相减就得到空闲时长。
+It uses `GetLastInputInfo()`, the user32 API that answers "when was the last
+keyboard/mouse input in this session?". It returns a tick count; the program
+polls it every 50 ms and subtracts `GetTickCount64()` to get the idle time.
 
-选择它的理由，正好对应题目里的约束：
+Why this API, mapped to the constraints:
 
-| 需求 | 结论 |
+| Requirement | Decision |
 | --- | --- |
-| 不改系统设置 | 不用注册表、不用屏保、不用电源策略，只调一个只读 API |
-| 不要内核驱动 | 不需要，输入时间戳由系统自己维护 |
-| 不要 hook | 不安装任何钩子，不注入进程，不碰安全软件红区 |
-| 能覆盖键盘和鼠标 | 该 API 统计的是整个会话的输入事件，不是某一个窗口的消息 |
+| Change no system settings | No registry, no screensaver, no power policy — one read-only API |
+| No kernel driver | Not needed; the kernel itself maintains the input timestamp |
+| No hooks | No hooks installed, no injection, nothing in AV red zones |
+| Cover keyboard and mouse | The API counts session-wide input events, not one window's messages |
 
-已知边界（不要指望它做不到的事）：
+Known boundaries (don't expect more than it can deliver):
 
-- 只覆盖**当前会话**。同一台机器上另一个用户会话的输入不算，反过来也一样。
-- 必须有交互式窗口站（`WinSta0`）。在无交互的会话里跑，`GetLastInputInfo` 会失败；
-  此时程序**不会装作在工作**，`start` 直接失败，日志写明原因，退出码 5。
-- 触摸、手写笔、远程桌面注入的输入在系统里同样计为输入，所以“远程连着不动”也算空闲。
-- 播放视频不等于有输入，所以看片不碰鼠标也会蓝屏——这正是这个工具存在的意义。
-- **`GetTickCount` 的 49.7 天回绕已显式处理**：内部计时全部用 `GetTickCount64()`
-  （64 位，理论上不回绕），`GetLastInputInfo().dwTime` 那个 32 位 tick 在检测到
-  “当前低 32 位比上次输入还小”时，判定中间发生过一次回绕，按上一个窗口重建空闲值。
-  所以机器连续开机 50 天也不会误判。
+- Covers only the **current session**. Input in another user session on the
+  same machine does not count, and vice versa.
+- Needs an interactive window station (`WinSta0`). Run it in a non-interactive
+  session and `GetLastInputInfo` fails; the program **does not pretend to
+  work** — `start` fails outright, the log says why, exit code 5.
+- Touch, pen and RDP-injected input all count as input, so "connected via RDP
+  but idle" counts as idle.
+- Playing a video is not input, so watching a movie without touching the
+  mouse will still bugcheck — that is the whole point of the tool.
+- **The 49.7-day `GetTickCount` wrap is handled explicitly**: internal timing
+  uses `GetTickCount64()` (64-bit, effectively never wraps), and when the 32-bit
+  `GetLastInputInfo().dwTime` shows "the current low 32 bits are smaller than
+  the last input", the code detects a wrap and reconstructs the idle value
+  against the previous window. A machine uptimes of 50 days does not misfire.
 
-如果哪天真机环境下这个 API 不可用，本程序的选择是**明确失败**，而不是偷偷降级。备选方案
-留到第 7 节讨论。
+If on a real machine this API is genuinely unavailable, the program chooses to
+**fail loudly** rather than silently degrade. Fallbacks are discussed in
+section 7.
 
-## 2. 蓝屏是怎么触发的
+## 2. How the bugcheck is raised
 
-`ntdll!NtRaiseHardError` 的第三个“响应选项”参数取 `OptionShutdownSystem`（枚举值 6，
-`winnt.h` 里零基）时，执行体不会弹框，而是直接按传入的 NTSTATUS 触发一次 bugcheck：
+When the third "response option" argument of `ntdll!NtRaiseHardError` is
+`OptionShutdownSystem` (enum value 6, zero-based in `winnt.h`), the executive
+does not show a dialog — it triggers a bugcheck with the given NTSTATUS:
 
 ```c
 ULONG_PTR params[4] = { idle_ms, limit_ms, interval_sec, 0x4B4D5645 };  /* "KMVE" */
 NtRaiseHardError(0xABCDEF12, 4, 0, params, OptionShutdownSystem, &response);
 ```
 
-于是蓝屏上出现：
+The bugcheck screen then shows:
 
 ```
 Stop code: 0xABCDEF12
 ```
 
-四个参数会显示成 `(0x..., 0x..., 0x..., 0x...)`，内容分别是“实际空闲毫秒、阈值毫秒、
-设定秒数、标记”，方便你在 dump 里一眼认出这次是 keepMoving 干的，而不是真的硬件故障。
+The four params show up as `(0x..., 0x..., 0x..., 0x...)` — actual idle ms,
+limit ms, configured seconds, tag — so you can tell from a dump that this was
+keepMoving, not a real hardware fault.
 
-这条路径需要特权：调用者令牌必须能打开 `SeShutdownPrivilege`（部分配置下还会检查
-`SeTcbPrivilege`）。程序会**两个都尝试**，并把每一步的结果写进日志：
+This path needs privileges: the caller's token must be able to enable
+`SeShutdownPrivilege` (some configurations also check `SeTcbPrivilege`). The
+program **tries both** and logs every step:
 
-- 成功 → 直接蓝屏，日志最后一行是 `calling NtRaiseHardError(...)`。
-- 失败 → 记下 `NTSTATUS`，程序保持武装，60 秒后重试一次，不会静默失败，也不会刷屏。
+- Success → immediate bugcheck; the last log line is `calling NtRaiseHardError(...)`.
+- Failure → the NTSTATUS is recorded, the watchdog stays armed, and it retries
+  in 60 seconds. It neither silently fails nor floods the log.
 
-所以：**用管理员身份运行**（`whoami` 显示在管理员组还不够，要真的 elevated）。如果日志里
-出现 `STATUS_PRIVILEGE_NOT_HELD`，说明当前令牌拿不到权限，此时用 SYSTEM 身份跑（服务或
-`psexec -s`）才行。`keepMoving diag` 会提前告诉你这两个权限到底能不能拿到。
+So: **run it elevated** (being in the Administrators group per `whoami` is not
+enough — you need a truly elevated token). If the log shows
+`STATUS_PRIVILEGE_NOT_HELD`, run as SYSTEM (a service or `psexec -s`).
+`keepMoving diag` tells you up front whether these privileges are available.
 
-## 3. 用法
+## 3. Usage
 
 ```
-keepMoving start <秒> [--dry-run] [--warn] [--quiet]
+keepMoving start <seconds> [--dry-run] [--warn] [--quiet]
 keepMoving stop [--force]
 keepMoving query [--json] [--clear] [--watch]
-keepMoving run <秒> [--dry-run] [--warn]
+keepMoving run <seconds> [--dry-run] [--warn]
 keepMoving diag
 keepMoving crash --confirm
 keepMoving version | help
 ```
 
-- `start`：拉起一个脱离终端的后台 worker（`DETACHED_PROCESS`），确认它起来了、状态文件
-  写好了，然后立刻返回。终端关掉、SSH 断掉都不影响它。
-  秒数支持 `30`、`90s`、`5m`、`1h` 这样的写法，范围 1 秒 ~ 7 天。
-- `stop`：通过命名事件通知 worker 自己退出，最多等 10 秒；它赖着不走时用 `--force`。
-- `query`：`state / pid / interval / idle / remaining / uptime`，`--json` 给脚本用，
-  `--watch` 每秒原地刷新一行（Ctrl+C 退出；手动敲 `query` 本身也算一次键盘输入，会把
-  空闲清零，所以要长时间观察就用 `--watch`），`--clear` 清掉上次蓝屏留下的标记文件。
-- `run`：前台模式，日志同时打到控制台，Ctrl+C 即停。调参、验证阈值时用它，别用它守夜。
-- `diag`：会话号、窗口站名、`GetLastInputInfo` 是否可用、`SeShutdown`/`SeTcb` 是否可
-  取、数据目录在哪。**上线前先跑这个**。
-- `crash --confirm`：立刻触发一次蓝屏，用来验证整条链路真的通。故意要 `--confirm`，
-  免得手滑。
+- `start`: spawns a detached background worker (`DETACHED_PROCESS`), confirms
+  it is up and the state file is written, then returns immediately. Closing
+  the terminal or dropping the SSH session does not affect it.
+  Intervals accept `30`, `90s`, `5m`, `1h`; range 1 second to 7 days.
+- `stop`: signals the worker via a named event and waits up to 10 s; use
+  `--force` if it refuses to leave.
+- `query`: prints `state / pid / interval / idle / remaining / uptime`.
+  `--json` is for scripts. `--watch` refreshes one line in place every second
+  (Ctrl+C to quit; note that typing `query` itself counts as keyboard input and
+  resets the idle timer, so use `--watch` for long observation).
+  `--clear` wipes the previous crash marker.
+- `run`: foreground mode, log mirrored to the console, Ctrl+C to stop. Use it
+  to tune thresholds, not to stand guard.
+- `diag`: session id, window station, whether `GetLastInputInfo` works, whether
+  `SeShutdown`/`SeTcb` can be held, where the data directory is. **Run this first.**
+- `crash --confirm`: triggers a bugcheck immediately to verify the whole chain.
+  The `--confirm` guard is deliberate.
 
-### 示例
+### Examples
 
 ```
 > keepMoving diag
@@ -132,25 +154,26 @@ bugcheck  : 0xABCDEF12 (NtRaiseHardError, OptionShutdownSystem)
 log       : C:\Users\me\AppData\Local\keepMoving\keepMoving.log
 ```
 
-### 退出码
+### Exit codes
 
-| 码 | 含义 |
+| Code | Meaning |
 | --- | --- |
-| 0 | 成功 |
-| 1 | 参数错误 |
-| 2 | 已经有一个 worker 在跑 |
-| 3 | `stop` 时没有在跑的 worker |
-| 4 | 内部错误（拉不起 worker、写不了状态文件等） |
-| 5 | 拿不到键鼠活动（无交互窗口站），拒绝武装 |
-| 7 | `NtRaiseHardError` 返回了，没蓝屏（通常是没权限） |
+| 0 | OK |
+| 1 | Bad arguments |
+| 2 | A worker is already running |
+| 3 | `stop` called with no running worker |
+| 4 | Internal error (spawn failed, state file unwritable, etc.) |
+| 5 | Cannot observe input (non-interactive window station); refusing to arm |
+| 7 | `NtRaiseHardError` returned without bugchecking (usually missing privilege) |
 
-## 4. 日志
+## 4. Logging
 
-`%LOCALAPPDATA%\keepMoving\keepMoving.log`，超过 2 MiB 滚动成 `keepMoving.log.1`。
-每行带毫秒时间戳、pid、tid、级别，每次写入都 `fflush` —— 蓝屏前那一行必须落盘，
-否则日志就失去了唯一的证据价值。
+`%LOCALAPPDATA%\keepMoving\keepMoving.log`, rolling over to `keepMoving.log.1`
+above 2 MiB. Every line carries a millisecond timestamp, pid, tid and level, and
+every write is `fflush`ed — the last line before the bugcheck must hit disk, or
+the log loses its only evidence value.
 
-一次完整的生命周期大概长这样：
+A full lifecycle looks roughly like this:
 
 ```
 2026-11-10 22:40:01.123 pid=18424 tid=19012 INFO  keepMoving worker starting, version 1.0.0
@@ -163,82 +186,99 @@ log       : C:\Users\me\AppData\Local\keepMoving\keepMoving.log
 2026-11-10 22:45:00.151 pid=18424 tid=19012 INFO  calling NtRaiseHardError(status=0xABCDEF12, ...)
 ```
 
-同时会写一个 `%LOCALAPPDATA%\keepMoving\last-crash.txt`，重启后 `query` 会把它显示出来，
-这样“上次为什么蓝屏”不用去翻事件查看器。
+A `%LOCALAPPDATA%\keepMoving\last-crash.txt` is also written; after a reboot
+`query` surfaces it, so you do not have to dig through Event Viewer to find out
+why the last crash happened.
 
-`%LOCALAPPDATA%\keepMoving\state.ini` 是 worker 的身份证（pid、间隔、进程创建时间、
-是否 dry-run）。用进程创建时间做二次校验，避免 pid 被系统复用后误判“还在跑”。
+`%LOCALAPPDATA%\keepMoving\state.ini` is the worker's identity card (pid,
+interval, process creation time, dry-run / warn flags). Process creation time
+is cross-checked so a reused pid does not make us believe the old worker is
+still alive.
 
-## 5. 为什么不是内核驱动，也不是屏保
+## 5. Why not a kernel driver, and not a screensaver
 
-题目给了两条备选路线，这里都没有采用，理由如下。
+The brief offered two alternatives; neither is taken, for these reasons.
 
-**内核驱动**：要拿到键鼠活动，驱动得挂 `kbdclass`/`mouclass` 的上层过滤，或者注册
-`PsSetLoadImageNotify`、定时读 `\Device\KeyboardClass0` 之类的东西。代价是必须签名
-（测试签名要开 `bcdedit /set testsigning on`，等于改系统启动配置）、必须处理
-`IRQL`/`PnP` 电源状态/卸载竞态，一个 bug 就是真蓝屏而不是“按需蓝屏”。而它换来的能力
-（“在没有交互会话的机器上也能判断输入”）在本工具的使用场景里恰恰没有意义：没人坐在
-电脑前的时候，本来就不该期待它判断“你有没有动鼠标”。
+**Kernel driver**: to observe input, a driver would have to layer-filter
+`kbdclass`/`mouclass`, or register `PsSetLoadImageNotify` and poll
+`\Device\KeyboardClass0`. The price is signing (test-signing means
+`bcdedit /set testsigning on` — itself a boot-config change), IRQL/PnP/power
+handling, and unload races — one bug and you get an *unwanted* bugcheck. And
+the only capability it buys ("detect input on a machine with no interactive
+session") is meaningless here: nobody is sitting at the box, so there is
+nothing to time out.
 
-**屏保方案**：把 exe 改名成 `.scr`、`SCRNSAVE.EXE` 指向它，确实能在“系统认为空闲”时
-被拉起。但它改的是系统设置（这一点直接违背前提），只能拿到系统自己的空闲判定（阈值
-在电源计划里，最细 1 分钟），而且屏保被用户一按键盘就退出，进程生命周期不受控，
-退出后还得有人再把它拉起来。作为“触发手段”它不如一次 `start` 干净。
+**Screensaver path**: renaming the exe to `.scr` and pointing `SCRNSAVE.EXE`
+at it does get launched when the system thinks it is idle. But it changes
+system settings (directly against the constraint), only gives you the system's
+own idle judgement (granularity 1 minute, lives in the power plan), and the
+screensaver exits on any keypress — its lifetime is out of your control and
+something would have to relaunch it. As a trigger it is less clean than one
+`start`.
 
-所以主路径就是 `GetLastInputInfo` 轮询：0 个驱动、0 个注册表写入、0 个系统设置变更。
+So the main path is `GetLastInputInfo` polling: 0 drivers, 0 registry writes,
+0 system-setting changes.
 
-## 6. 构建
+## 6. Building
 
-产物由 GitHub Actions 的 `windows-latest` runner 用 MSVC 编译，本地不编译：
+Artifacts are built by GitHub Actions on `windows-latest` with MSVC; nothing is
+compiled locally:
 
 ```powershell
-# runner 上实际执行的等价命令
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # 已先 ilammy/msvc-dev-cmd 载入 MSVC
+# equivalent of what the runner actually runs
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # MSVC env already loaded via ilammy/msvc-dev-cmd
 cmake --build build --config Release
 ```
 
-- 矩阵：`x64` + `x86`，产物分别是 `keepMoving-x64.exe` / `keepMoving-x86.exe`。
-- CRT 静态链接（`/MT`），目标机器不需要 VC++ 运行库。
-- 依赖只有 `user32`、`advapi32`，无第三方库。
-- CI 里只跑 `--dry-run` 冒烟测试：`version` / `diag` / `start 120 --dry-run` /
-  `query` / 重复 `start`（应被拒绝）/ `stop` / 再 `query`，并把日志尾巴打出来。
-  **CI 永远不会真的蓝屏**，否则 runner 会当场挂掉。
+- Matrix: `x64` + `x86`, producing `keepMoving-x64.exe` / `keepMoving-x86.exe`.
+- CRT statically linked (`/MT`); target machines need no VC++ runtime.
+- Only `user32` and `advapi32`; no third-party libraries.
+- CI runs a `--dry-run` smoke test: `version` / `diag` / `start 120 --dry-run`
+  / `query` / a duplicate `start` (must be rejected) / `stop` / `query` again,
+  plus a `start 120 --warn` that is stopped before the dialog fires.
+  **CI never actually bugchecks**, or the runner would die on the spot.
 
-## 7. 如果 `GetLastInputInfo` 在你的环境里拿不到
+## 7. If `GetLastInputInfo` does not work in your environment
 
-先跑 `keepMoving diag` 看 `window station` 和 `GetLastInputInfo` 两行。绝大多数“拿不到”
-都是因为程序跑在服务会话（session 0）或者没有交互式窗口站的容器里。此时可选：
+Run `keepMoving diag` and look at the `window station` and `GetLastInputInfo`
+lines. Most "it doesn't work" cases come from running in session 0 or in a
+container without an interactive window station. Options:
 
-1. **换到用户桌面会话里跑**（最省事）：交互式登录后的 cmd/PowerShell，管理员身份。
-2. **加一层原始输入兜底**：建一个 message-only 窗口，`RegisterRawInputDevices` 带
-   `RIDEV_INPUTSINK`，用 `WM_INPUT` 的时间戳当“最后输入时间”，和 `GetLastInputInfo`
-   取较大值。仍然是纯用户态、仍然不改系统设置，但只能在有窗口站的进程里工作，所以它
-   救不了第 1 条救不了的场景。本版本没有内置，接口已经留在 `input.c` 里。
-3. **内核驱动**：只有“必须在无交互会话里判断真实硬件输入”才值得付这个代价（签名、
-   WDK、蓝屏风险），见第 5 节。
-4. **屏保**：会改系统设置，不建议。
+1. **Run it in the user's desktop session** (easiest): an interactive cmd /
+   PowerShell, elevated.
+2. **Add a raw-input fallback**: create a message-only window,
+   `RegisterRawInputDevices` with `RIDEV_INPUTSINK`, and use the `WM_INPUT`
+   timestamp as the "last input" time, taking the max with
+   `GetLastInputInfo`. Still pure user mode, still no system changes — but it
+   only works in a process with a window station, so it cannot rescue case 1.
+   Not built into this version; the hook is left in `input.c`.
+3. **Kernel driver**: only worth it if you truly must detect real hardware
+   input in a non-interactive session (signing, WDK, bugcheck risk). See
+   section 5.
+4. **Screensaver**: it changes system settings; not recommended.
 
-## 8. 目录结构
+## 8. Layout
 
 ```
 keepMoving/
 ├─ CMakeLists.txt
 ├─ README.md
-├─ .github/workflows/build.yml     # windows-latest + MSVC + Ninja 矩阵构建
-├─ scripts/smoke-test.ps1          # 只跑 dry-run 的冒烟测试
+├─ .github/workflows/build.yml     # windows-latest + MSVC + Ninja matrix build
+├─ scripts/smoke-test.ps1          # dry-run-only smoke test
 └─ src/
-   ├─ km.h          # 公共声明、常量、退出码
-   ├─ main.c        # wmain：命令解析与分发
-   ├─ worker.c      # 守夜循环、start/stop/query/diag/crash
-   ├─ input.c       # GetLastInputInfo 封装
-   ├─ bsod.c        # 权限提升 + NtRaiseHardError
-   ├─ state.c       # state.ini 与 last-crash.txt
-   ├─ log.c         # 带时间戳、pid、tid 的文件日志
-   └─ util.c        # 路径、进程探活、错误格式化
+   ├─ km.h          # shared declarations, constants, exit codes
+   ├─ main.c        # wmain: command parsing and dispatch
+   ├─ worker.c      # watchdog loop, start/stop/query/diag/crash
+   ├─ input.c       # GetLastInputInfo wrapper
+   ├─ bsod.c        # privilege enablement + NtRaiseHardError
+   ├─ state.c       # state.ini and last-crash.txt
+   ├─ log.c         # timestamped/pid/tid file logging
+   └─ util.c        # paths, process liveness, error formatting
 ```
 
-## 9. 一句话总结风险
+## 9. Risk, in one line
 
-这程序的功能就是“在你不听话的时候把机器打停”。它按你的要求做了，也按你的要求尽量
-不污染系统：只写自己目录下的三个文件，只调一个只读 API，不改任何系统设置。但蓝屏本身
-一定会带走未保存的数据，第一次请先 `--dry-run`，第二次再 `start 5m`。
+This program's job is to stop the machine when you stop touching it. It does
+exactly that, and by design pollutes nothing: it writes three files under its
+own directory, calls one read-only API, and changes no system setting. But a
+bugcheck does destroy unsaved work — run `--dry-run` first, then `start 5m`.

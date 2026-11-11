@@ -116,10 +116,13 @@ int km_worker_core(DWORD interval, int dry_run, BOOL console)
     HANDLE     stop_ev = NULL;
     DWORD      waitres;
     ULONG      limit_ms;
-    DWORD      last_beat = 0;
-    DWORD      crash_next_try = 0;
+    ULONGLONG  now64 = 0;
+    ULONGLONG  idle = 0;
+    ULONGLONG  remaining = 0;
+    ULONGLONG  last_beat = 0;
+    ULONGLONG  crash_retry_until = 0;
     DWORD      input_fail = 0;
-    DWORD      input_fail_log = 0;
+    ULONGLONG  input_fail_log = 0;
     BOOL       warned_30 = FALSE;
     BOOL       warned_10 = FALSE;
     int        rc = KM_EXIT_OK;
@@ -217,11 +220,6 @@ int km_worker_core(DWORD interval, int dry_run, BOOL console)
             (unsigned long)limit_ms, (unsigned long)KM_POLL_MS);
 
     while (TRUE) {
-        DWORD now;
-        DWORD last = 0;
-        DWORD idle;
-        DWORD remaining;
-
         waitres = WaitForSingleObject(stop_ev, KM_POLL_MS);
 
         if (waitres == WAIT_OBJECT_0) {
@@ -232,14 +230,15 @@ int km_worker_core(DWORD interval, int dry_run, BOOL console)
             KM_WARN("unexpected wait result %lu", (unsigned long)waitres);
         }
 
-        now = GetTickCount();
+        now64 = GetTickCount64();
+        idle  = km_input_idle_ms();
 
-        if (!km_input_last_tick(&last)) {
+        if (idle == (ULONGLONG)-1) {
             ++input_fail;
             if (input_fail == 1 ||
-                (DWORD)(now - input_fail_log) > KM_HEARTBEAT_MS) {
+                (now64 - input_fail_log) >= KM_HEARTBEAT_MS) {
                 KM_ERROR("GetLastInputInfo failed while the watchdog is running");
-                input_fail_log = now;
+                input_fail_log = now64;
             }
             if (input_fail > 120) {
                 KM_ERROR("input tracking lost permanently, disarming");
@@ -250,45 +249,44 @@ int km_worker_core(DWORD interval, int dry_run, BOOL console)
         }
         input_fail = 0;
 
-        idle = (DWORD)(now - last);          /* unsigned wrap is intentional */
-        remaining = (idle >= limit_ms) ? 0 : (limit_ms - idle);
+        remaining = (idle >= limit_ms) ? 0ULL : ((ULONGLONG)limit_ms - idle);
 
-        if (remaining > 30000UL) {
+        if (remaining > 30000ULL) {
             warned_30 = FALSE;
             warned_10 = FALSE;
         }
 
         if (idle >= limit_ms) {
-            if (crash_next_try != 0 && (LONG)(now - crash_next_try) < 0) {
+            if (crash_retry_until != 0 && now64 < crash_retry_until) {
                 /* cooling down after a failed attempt */
             } else {
-                rc = km_do_crash(interval, idle, limit_ms, dry_run);
+                rc = km_do_crash(interval, (DWORD)idle, limit_ms, dry_run);
                 if (rc == KM_EXIT_OK) {
                     /* dry run: nothing else to do, disarm */
                     break;
                 }
-                crash_next_try = now + KM_CRASH_RETRY_MS;
+                crash_retry_until = now64 + KM_CRASH_RETRY_MS;
                 rc = KM_EXIT_OK;
             }
         } else {
-            crash_next_try = 0;
+            crash_retry_until = 0;
 
-            if (remaining <= 10000UL && !warned_10) {
+            if (remaining <= 10000ULL && !warned_10) {
                 KM_WARN("10 s left: idle %.1f s of %lu s, move the mouse now",
                         (double)idle / 1000.0, (unsigned long)interval);
                 warned_10 = TRUE;
-            } else if (remaining <= 30000UL && !warned_30) {
+            } else if (remaining <= 30000ULL && !warned_30) {
                 KM_WARN("30 s left: idle %.1f s of %lu s",
                         (double)idle / 1000.0, (unsigned long)interval);
                 warned_30 = TRUE;
             }
         }
 
-        if ((DWORD)(now - last_beat) >= KM_HEARTBEAT_MS) {
+        if ((now64 - last_beat) >= KM_HEARTBEAT_MS) {
             KM_INFO("heartbeat: idle %.1f s, remaining %.1f s, limit %lu s",
                     (double)idle / 1000.0, (double)remaining / 1000.0,
                     (unsigned long)interval);
-            last_beat = now;
+            last_beat = now64;
         }
     }
 
@@ -544,9 +542,7 @@ int km_cmd_query(int as_json, int clear_crash)
     char      uptime[32];
     BOOL      running = FALSE;
     ULONGLONG created = 0;
-    DWORD     last_tick = 0;
     BOOL      have_tick = FALSE;
-    DWORD     now = 0;
     double    idle_s = 0.0;
     double    remaining_s = 0.0;
     ULONGLONG uptime_s = 0;
@@ -575,16 +571,18 @@ int km_cmd_query(int as_json, int clear_crash)
                 uptime_s = (now64 - created) / 10000000ULL;
         }
 
-        now = GetTickCount();
-        have_tick = km_input_last_tick(&last_tick);
-        if (have_tick) {
-            DWORD idle_ms = (DWORD)(now - last_tick);
-            double limit_ms = (double)st.interval * 1000.0;
+        {
+            ULONGLONG idle = km_input_idle_ms();
 
-            idle_s = (double)idle_ms / 1000.0;
-            remaining_s = (limit_ms - (double)idle_ms) / 1000.0;
-            if (remaining_s < 0.0)
-                remaining_s = 0.0;
+            have_tick = (idle != (ULONGLONG)-1);
+            if (have_tick) {
+                double limit_ms = (double)st.interval * 1000.0;
+
+                idle_s = (double)idle / 1000.0;
+                remaining_s = (limit_ms - (double)idle) / 1000.0;
+                if (remaining_s < 0.0)
+                    remaining_s = 0.0;
+            }
         }
     }
 
@@ -657,9 +655,8 @@ int km_cmd_diag(void)
     DWORD        sid = 0;
     wchar_t      wsname[256];
     DWORD        wslen = 0;
-    LASTINPUTINFO li;
     BOOL         glii_ok;
-    DWORD        now;
+    ULONGLONG    diag_idle;
     BOOL         held = FALSE;
     BOOL         ok;
     wchar_t      exe[MAX_PATH];
@@ -675,15 +672,13 @@ int km_cmd_diag(void)
     ZeroMemory(&st, sizeof(st));
 
     GetModuleFileNameW(NULL, exe, MAX_PATH);
-    now = GetTickCount();
 
     wsname[0] = 0;
     GetUserObjectInformationW(GetProcessWindowStation(), UOI_NAME, wsname,
                               sizeof(wsname) - sizeof(wchar_t), &wslen);
 
-    ZeroMemory(&li, sizeof(li));
-    li.cbSize = sizeof(li);
-    glii_ok = GetLastInputInfo(&li) ? TRUE : FALSE;
+    diag_idle = km_input_idle_ms();
+    glii_ok = (diag_idle != (ULONGLONG)-1);
 
     ProcessIdToSessionId(GetCurrentProcessId(), &session);
     sid = session;
@@ -697,11 +692,12 @@ int km_cmd_diag(void)
     printf("interactive    : %s\n", wsname[0] ? "yes" : "no");
     printf("GetLastInputInfo: %s", glii_ok ? "ok" : "FAILED");
     if (glii_ok) {
-        printf(" (last input %lu ms ago)\n", (unsigned long)(now - li.dwTime));
+        printf(" (last input %.1f s ago)\n", (double)diag_idle / 1000.0);
     } else {
         printf("\n");
     }
-    printf("tick count     : %lu\n", (unsigned long)now);
+    printf("tick count64  : %llu ms (since boot)\n",
+           (unsigned long long)GetTickCount64());
 
     e[0] = 0;
     ok = km_enable_privilege(SE_SHUTDOWN_NAME, &held, e, sizeof(e));
@@ -728,9 +724,9 @@ int km_cmd_diag(void)
         printf("state file     : none\n");
     }
 
-    KM_INFO("diag: session=%lu windsta=%ls glii=%d tick=%lu",
+    KM_INFO("diag: session=%lu windsta=%ls glii=%d tick64=%llu",
             (unsigned long)sid, wsname[0] ? wsname : L"(none)", (int)glii_ok,
-            (unsigned long)now);
+            (unsigned long long)GetTickCount64());
 
     km_log_close();
     (void)created;

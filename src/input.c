@@ -56,3 +56,28 @@ BOOL km_input_last_tick(DWORD *tick)
     *tick = li.dwTime;
     return TRUE;
 }
+
+ULONGLONG km_input_idle_ms(void)
+{
+    ULONGLONG now64;
+    DWORD     now_lo;
+    DWORD     last = 0;
+
+    if (!km_input_last_tick(&last))
+        return (ULONGLONG)-1;
+
+    now64  = GetTickCount64();
+    now_lo = (DWORD)now64;
+
+    /*
+     * GetLastInputInfo().dwTime is a 32-bit tick count that wraps after
+     * ~49.7 days.  If the low 32 bits of the current time are smaller than
+     * the recorded input tick, the counter has wrapped since the last input:
+     * the input tick then belongs to the *previous* 32-bit window, so the
+     * idle is 2^32 + now_lo - last.
+     */
+    if (now_lo >= last)
+        return (ULONGLONG)(now_lo - last);
+
+    return 0x100000000ULL + (ULONGLONG)now_lo - (ULONGLONG)last;
+}

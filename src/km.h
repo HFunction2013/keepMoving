@@ -102,6 +102,12 @@ BOOL  km_crash_marker_clear(const km_paths *p);
 /* input.c */
 BOOL  km_input_probe(char *err, size_t cap);
 BOOL  km_input_last_tick(DWORD *tick);
+/*
+ * Idle time in milliseconds, reconstructed against GetTickCount64 so a 32-bit
+ * tick wrap at ~49.7 days is handled explicitly.  Returns (ULONGLONG)-1 when
+ * GetLastInputInfo itself fails.
+ */
+ULONGLONG km_input_idle_ms(void);
 
 /* bsod.c */
 BOOL  km_enable_privilege(const wchar_t *name, BOOL *held, char *err, size_t cap);

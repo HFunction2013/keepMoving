@@ -9,4 +9,3 @@ out/
 .idea/
 
 # workflow file pending (needs workflow scope to push)
-.github/workflows/build.yml

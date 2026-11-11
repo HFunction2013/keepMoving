@@ -127,7 +127,6 @@ static void km_show_warn_box(DWORD interval, DWORD idle_ms)
 
 int km_worker_core(DWORD interval, int mode, BOOL console)
 {
-{
     km_paths   paths;
     km_state   st;
     char       err[256];
@@ -660,7 +659,7 @@ int km_cmd_query(int as_json, int clear_crash, int watch)
                     rem_s = 0.0;
                 printf("\r[RUNNING] idle %6.1fs / %-5lus   remaining %6.1fs   "
                        "pid=%-5lu%-12s ",
-                       i_s, (double)cur.interval, rem_s,
+                       i_s, (unsigned long)cur.interval, rem_s,
                        (unsigned long)cur.pid,
                        cur.warn_run ? " (warn)" : (cur.dry_run ? " (dry)" : ""));
             }

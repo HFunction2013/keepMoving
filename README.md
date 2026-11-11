@@ -8,7 +8,9 @@
 
 ```
 keepMoving start 300         # 5 分钟不动键盘鼠标就蓝屏
+keepMoving start 300 --warn  # 到点改弹置顶 MessageBox，点掉后自动撤防
 keepMoving query             # 现在还有多少秒
+keepMoving query --watch     # 每秒刷新一行实时倒计时
 keepMoving stop              # 拆掉定时器
 ```
 
@@ -21,7 +23,7 @@ keepMoving stop              # 拆掉定时器
 ## 1. 怎么判定“键鼠没有活动”
 
 用 `GetLastInputInfo()`，这是 user32 暴露的、专门回答“本会话最后一次键鼠输入是什么时候”
-的 API。它返回一个 tick 值，程序每 500 ms 取一次，用 `GetTickCount()` 相减就得到空闲时长。
+的 API。它返回一个 tick 值，程序每 50 ms 取一次，用 `GetTickCount64()` 相减就得到空闲时长。
 
 选择它的理由，正好对应题目里的约束：
 
@@ -79,10 +81,10 @@ Stop code: 0xABCDEF12
 ## 3. 用法
 
 ```
-keepMoving start <秒> [--dry-run] [--quiet]
+keepMoving start <秒> [--dry-run] [--warn] [--quiet]
 keepMoving stop [--force]
-keepMoving query [--json] [--clear]
-keepMoving run <秒> [--dry-run]
+keepMoving query [--json] [--clear] [--watch]
+keepMoving run <秒> [--dry-run] [--warn]
 keepMoving diag
 keepMoving crash --confirm
 keepMoving version | help
@@ -93,7 +95,8 @@ keepMoving version | help
   秒数支持 `30`、`90s`、`5m`、`1h` 这样的写法，范围 1 秒 ~ 7 天。
 - `stop`：通过命名事件通知 worker 自己退出，最多等 10 秒；它赖着不走时用 `--force`。
 - `query`：`state / pid / interval / idle / remaining / uptime`，`--json` 给脚本用，
-  `--clear` 清掉上次蓝屏留下的标记文件。
+  `--watch` 每秒原地刷新一行（Ctrl+C 退出；手动敲 `query` 本身也算一次键盘输入，会把
+  空闲清零，所以要长时间观察就用 `--watch`），`--clear` 清掉上次蓝屏留下的标记文件。
 - `run`：前台模式，日志同时打到控制台，Ctrl+C 即停。调参、验证阈值时用它，别用它守夜。
 - `diag`：会话号、窗口站名、`GetLastInputInfo` 是否可用、`SeShutdown`/`SeTcb` 是否可
   取、数据目录在哪。**上线前先跑这个**。
@@ -124,7 +127,7 @@ interval  : 300 s
 idle      : 42.5 s
 remaining : 257.5 s
 started   : uptime 00:03:11
-mechanism : GetLastInputInfo polling every 500 ms
+mechanism : GetLastInputInfo polling every 50 ms
 bugcheck  : 0xABCDEF12 (NtRaiseHardError, OptionShutdownSystem)
 log       : C:\Users\me\AppData\Local\keepMoving\keepMoving.log
 ```
@@ -152,7 +155,7 @@ log       : C:\Users\me\AppData\Local\keepMoving\keepMoving.log
 ```
 2026-11-10 22:40:01.123 pid=18424 tid=19012 INFO  keepMoving worker starting, version 1.0.0
 2026-11-10 22:40:01.126 pid=18424 tid=19012 INFO  input source: GetLastInputInfo (user mode, no hooks, no driver)
-2026-11-10 22:40:01.130 pid=18424 tid=19012 INFO  watchdog armed, idle limit 300000 ms, poll interval 500 ms
+2026-11-10 22:40:01.130 pid=18424 tid=19012 INFO  watchdog armed, idle limit 300000 ms, poll interval 50 ms
 2026-11-10 22:40:31.132 pid=18424 tid=19012 INFO  heartbeat: idle 12.0 s, remaining 288.0 s, limit 300 s
 2026-11-10 22:44:50.140 pid=18424 tid=19012 WARN  10 s left: idle 290.0 s of 300 s, move the mouse now
 2026-11-10 22:45:00.145 pid=18424 tid=19012 WARN  IDLE LIMIT REACHED: no keyboard/mouse input for 300.1 s (limit 300 s)

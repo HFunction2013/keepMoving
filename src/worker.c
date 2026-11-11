@@ -8,11 +8,12 @@
 
 #include "km.h"
 
-#define KM_POLL_MS            500UL
+#define KM_POLL_MS            50UL
 #define KM_HEARTBEAT_MS       30000UL
 #define KM_CRASH_RETRY_MS     60000UL
 #define KM_START_TIMEOUT_MS   2000UL
 #define KM_STOP_TIMEOUT_MS    10000UL
+#define KM_WATCH_TICK_MS      1000UL
 
 static HANDLE g_stop_event = NULL;
 
@@ -32,7 +33,7 @@ static void km_format_uptime(ULONGLONG seconds, char *buf, size_t cap)
                 (unsigned long long)(seconds % 60));
 }
 
-static int km_do_crash(DWORD interval, DWORD idle_ms, ULONG limit_ms, int dry_run)
+static int km_try_crash(DWORD interval, DWORD idle_ms, ULONG limit_ms)
 {
     km_paths paths;
     char     err[256];
@@ -53,10 +54,10 @@ static int km_do_crash(DWORD interval, DWORD idle_ms, ULONG limit_ms, int dry_ru
     km_now_str(now, sizeof(now));
     _snprintf_s(detail, sizeof(detail), _TRUNCATE,
                 "time=%s\r\npid=%lu\r\ninterval_sec=%lu\r\nidle_ms=%lu\r\n"
-                "bugcheck=0x%08lX\r\ndry_run=%d\r\n",
+                "bugcheck=0x%08lX\r\nmode=crash\r\n",
                 now, (unsigned long)GetCurrentProcessId(),
                 (unsigned long)interval, (unsigned long)idle_ms,
-                (unsigned long)KM_BUGCHECK_CODE, dry_run);
+                (unsigned long)KM_BUGCHECK_CODE);
 
     if (km_crash_marker_write(&paths, detail))
         KM_INFO("crash marker written to %ls", paths.crash);
@@ -64,11 +65,6 @@ static int km_do_crash(DWORD interval, DWORD idle_ms, ULONG limit_ms, int dry_ru
         KM_ERROR("failed to write crash marker %ls", paths.crash);
 
     km_log_flush();
-
-    if (dry_run) {
-        KM_INFO("dry run: NtRaiseHardError is not called, the machine stays alive");
-        return KM_EXIT_OK;
-    }
 
     e1[0] = 0;
     ok = km_enable_privilege(SE_SHUTDOWN_NAME, &held, e1, sizeof(e1));
@@ -107,7 +103,30 @@ static int km_do_crash(DWORD interval, DWORD idle_ms, ULONG limit_ms, int dry_ru
     return KM_EXIT_CRASH_CALL_FAIL;
 }
 
-int km_worker_core(DWORD interval, int dry_run, BOOL console)
+static void km_show_warn_box(DWORD interval, DWORD idle_ms)
+{
+    wchar_t text[320];
+    int     r;
+
+    StringCchPrintfW(text, 320,
+                     L"keepMoving: no keyboard or mouse input for %lu s "
+                     L"(limit %lu s).\r\n\r\n"
+                     L"Press OK to disarm the watchdog.",
+                     (unsigned long)(idle_ms / 1000),
+                     (unsigned long)interval);
+
+    KM_WARN("idle limit reached in warn mode, showing topmost dialog");
+    km_log_flush();
+
+    r = MessageBoxW(NULL, text, L"keepMoving",
+                    MB_OK | MB_ICONWARNING | MB_TOPMOST |
+                    MB_SETFOREGROUND | MB_SYSTEMMODAL);
+
+    KM_INFO("warning dialog dismissed (result=%d), disarming", r);
+}
+
+int km_worker_core(DWORD interval, int mode, BOOL console)
+{
 {
     km_paths   paths;
     km_state   st;
@@ -143,9 +162,9 @@ int km_worker_core(DWORD interval, int dry_run, BOOL console)
 
     KM_INFO("========================================================");
     KM_INFO("keepMoving worker starting, version %s", KM_VERSION_STR);
-    KM_INFO("pid=%lu interval=%lu s dry_run=%d console=%d",
+    KM_INFO("pid=%lu interval=%lu s mode=%d console=%d",
             (unsigned long)GetCurrentProcessId(), (unsigned long)interval,
-            dry_run, (int)console);
+            mode, (int)console);
     KM_INFO("data directory: %ls", paths.dir);
     KM_INFO("log file      : %ls", paths.log);
 
@@ -197,7 +216,8 @@ int km_worker_core(DWORD interval, int dry_run, BOOL console)
     ZeroMemory(&st, sizeof(st));
     st.pid = GetCurrentProcessId();
     st.interval = interval;
-    st.dry_run = dry_run;
+    st.dry_run = (mode == KM_MODE_DRY);
+    st.warn_run = (mode == KM_MODE_WARN);
     st.proc_create = km_self_create_time();
 
     if (!km_state_write(&paths, &st)) {
@@ -257,14 +277,18 @@ int km_worker_core(DWORD interval, int dry_run, BOOL console)
         }
 
         if (idle >= limit_ms) {
+            if (mode == KM_MODE_WARN) {
+                km_show_warn_box(interval, (DWORD)idle);
+                break;
+            }
+            if (mode == KM_MODE_DRY) {
+                KM_INFO("dry run: limit reached, disarming without crash");
+                break;
+            }
             if (crash_retry_until != 0 && now64 < crash_retry_until) {
-                /* cooling down after a failed attempt */
+                /* cooling down after a failed crash attempt */
             } else {
-                rc = km_do_crash(interval, (DWORD)idle, limit_ms, dry_run);
-                if (rc == KM_EXIT_OK) {
-                    /* dry run: nothing else to do, disarm */
-                    break;
-                }
+                rc = km_try_crash(interval, (DWORD)idle, limit_ms);
                 crash_retry_until = now64 + KM_CRASH_RETRY_MS;
                 rc = KM_EXIT_OK;
             }
@@ -307,12 +331,26 @@ cleanup:
     return rc;
 }
 
-int km_cmd_run(DWORD interval, int dry_run)
+int km_cmd_run(DWORD interval, int mode)
 {
-    return km_worker_core(interval, dry_run, TRUE);
+    return km_worker_core(interval, mode, TRUE);
 }
 
-int km_cmd_start(DWORD interval, int dry_run, int quiet)
+static const wchar_t *km_mode_suffix(int mode)
+{
+    if (mode == KM_MODE_DRY)  return L" --dry-run";
+    if (mode == KM_MODE_WARN) return L" --warn";
+    return L"";
+}
+
+static const char *km_mode_label(int mode)
+{
+    if (mode == KM_MODE_DRY)  return "dry run";
+    if (mode == KM_MODE_WARN) return "warn";
+    return "crash";
+}
+
+int km_cmd_start(DWORD interval, int mode, int quiet)
 {
     km_paths            paths;
     km_state            existing;
@@ -335,8 +373,8 @@ int km_cmd_start(DWORD interval, int dry_run, int quiet)
     }
 
     km_log_open(paths.log, paths.log_old);
-    KM_INFO("start requested: interval=%lu s dry_run=%d",
-            (unsigned long)interval, dry_run);
+    KM_INFO("start requested: interval=%lu s mode=%s",
+            (unsigned long)interval, km_mode_label(mode));
 
     if (interval < 10)
         KM_WARN("interval %lu s is very short, the machine may bugcheck almost "
@@ -369,8 +407,7 @@ int km_cmd_start(DWORD interval, int dry_run, int quiet)
 
     StringCchPrintfW(cmd, sizeof(cmd) / sizeof(cmd[0]),
                      L"\"%s\" __worker --interval %lu%s",
-                     exe, (unsigned long)interval,
-                     dry_run ? L" --dry-run" : L"");
+                     exe, (unsigned long)interval, km_mode_suffix(mode));
 
     ZeroMemory(&si, sizeof(si));
     ZeroMemory(&pi, sizeof(pi));
@@ -433,13 +470,14 @@ int km_cmd_start(DWORD interval, int dry_run, int quiet)
         return KM_EXIT_ERROR;
     }
 
-    KM_INFO("watchdog is running: pid=%lu interval=%lu s dry_run=%d",
-            (unsigned long)pi.dwProcessId, (unsigned long)interval, dry_run);
+    KM_INFO("watchdog is running: pid=%lu interval=%lu s mode=%s",
+            (unsigned long)pi.dwProcessId, (unsigned long)interval,
+            km_mode_label(mode));
 
     if (!quiet) {
-        printf("keepMoving: watchdog started (pid=%lu, interval=%lu s%s)\n",
+        printf("keepMoving: watchdog started (pid=%lu, interval=%lu s, mode=%s)\n",
                (unsigned long)pi.dwProcessId, (unsigned long)interval,
-               dry_run ? ", dry run" : "");
+               km_mode_label(mode));
         printf("keepMoving: log %ls\n", paths.log);
     }
 
@@ -532,7 +570,7 @@ int km_cmd_stop(int force)
     return rc;
 }
 
-int km_cmd_query(int as_json, int clear_crash)
+int km_cmd_query(int as_json, int clear_crash, int watch)
 {
     km_paths  paths;
     km_state  st;
@@ -591,13 +629,54 @@ int km_cmd_query(int as_json, int clear_crash)
     km_crash_marker_read(&paths, marker, sizeof(marker));
     km_json_str(paths.log, log_json, sizeof(log_json));
 
+    if (watch && !as_json) {
+        printf("watching keepMoving (Ctrl+C to stop)...\n");
+        while (TRUE) {
+            km_state  cur;
+            ULONGLONG cur_idle;
+            double    i_s;
+            double    rem_s;
+            double    lim;
+            BOOL      still;
+
+            ZeroMemory(&cur, sizeof(cur));
+            still = (km_state_read(&paths, &cur) && cur.valid &&
+                     km_pid_alive(cur.pid, cur.proc_create));
+
+            if (!still) {
+                printf("\r[STOPPED] watchdog is not running.                              \n");
+                break;
+            }
+
+            cur_idle = km_input_idle_ms();
+            if (cur_idle == (ULONGLONG)-1) {
+                printf("\r[RUNNING] pid=%-5lu idle=n/a (GetLastInputInfo failed)     ",
+                       (unsigned long)cur.pid);
+            } else {
+                lim = (double)cur.interval * 1000.0;
+                i_s = (double)cur_idle / 1000.0;
+                rem_s = (lim - (double)cur_idle) / 1000.0;
+                if (rem_s < 0.0)
+                    rem_s = 0.0;
+                printf("\r[RUNNING] idle %6.1fs / %-5lus   remaining %6.1fs   "
+                       "pid=%-5lu%-12s ",
+                       i_s, (double)cur.interval, rem_s,
+                       (unsigned long)cur.pid,
+                       cur.warn_run ? " (warn)" : (cur.dry_run ? " (dry)" : ""));
+            }
+            fflush(stdout);
+            Sleep(KM_WATCH_TICK_MS);
+        }
+        return KM_EXIT_OK;
+    }
+
     if (as_json) {
         if (running) {
             printf("{\"state\":\"running\",\"pid\":%lu,\"interval_sec\":%lu,"
-                   "\"dry_run\":%s,\"idle_sec\":%.1f,\"remaining_sec\":%.1f,"
+                   "\"mode\":\"%s\",\"idle_sec\":%.1f,\"remaining_sec\":%.1f,"
                    "\"uptime_sec\":%llu,\"input_readable\":%s,\"log\":\"%s\"%s%s}\n",
                    (unsigned long)st.pid, (unsigned long)st.interval,
-                   st.dry_run ? "true" : "false",
+                   st.warn_run ? "warn" : (st.dry_run ? "dry" : "crash"),
                    idle_s, remaining_s, (unsigned long long)uptime_s,
                    have_tick ? "true" : "false",
                    log_json,
@@ -611,7 +690,9 @@ int km_cmd_query(int as_json, int clear_crash)
         }
     } else {
         if (running) {
-            printf("state     : RUNNING%s\n", st.dry_run ? " (dry run)" : "");
+            printf("state     : RUNNING%s%s\n",
+                   st.dry_run ? " (dry run)" : "",
+                   st.warn_run ? " (warn)" : "");
             printf("pid       : %lu\n", (unsigned long)st.pid);
             printf("interval  : %lu s\n", (unsigned long)st.interval);
             if (have_tick) {
@@ -717,8 +798,9 @@ int km_cmd_diag(void)
 
         km_pid_create_time(st.pid, &alive_create);
         created = alive_create;
-        printf("state file     : pid=%lu interval=%lu s dry_run=%d alive=%s\n",
-               (unsigned long)st.pid, (unsigned long)st.interval, st.dry_run,
+        printf("state file     : pid=%lu interval=%lu s mode=%s alive=%s\n",
+               (unsigned long)st.pid, (unsigned long)st.interval,
+               st.warn_run ? "warn" : (st.dry_run ? "dry" : "crash"),
                km_pid_alive(st.pid, st.proc_create) ? "yes" : "no");
     } else {
         printf("state file     : none\n");

@@ -10,10 +10,10 @@ static void print_usage(void)
         "               untouched for the given number of seconds.\n"
         "\n"
         "usage:\n"
-        "  keepMoving start <seconds> [--dry-run] [--quiet]\n"
+        "  keepMoving start <seconds> [--dry-run] [--warn] [--quiet]\n"
         "  keepMoving stop [--force]\n"
-        "  keepMoving query [--json] [--clear]\n"
-        "  keepMoving run <seconds> [--dry-run]\n"
+        "  keepMoving query [--json] [--clear] [--watch]\n"
+        "  keepMoving run <seconds> [--dry-run] [--warn]\n"
         "  keepMoving diag\n"
         "  keepMoving crash --confirm\n"
         "  keepMoving version\n"
@@ -22,7 +22,7 @@ static void print_usage(void)
         "  start   arm the watchdog in a detached background worker, then return.\n"
         "  stop    disarm it and wait for the worker to exit.\n"
         "  query   show whether it is armed, how idle the machine is and how much\n"
-        "          time is left before the bugcheck.\n"
+        "          time is left.  --watch refreshes the line once a second.\n"
         "  run     same as start but stays in the foreground, log mirrored on the\n"
         "          console (Ctrl+C disarms).\n"
         "  diag    print environment diagnostics: session, window station, the\n"
@@ -30,8 +30,12 @@ static void print_usage(void)
         "  crash   raise the bugcheck immediately, for verification. Needs\n"
         "          --confirm, because unsaved work will be lost.\n"
         "\n"
+        "modes:\n"
+        "  (none)  idle limit reached -> NtRaiseHardError(0x%08lX), machine stops.\n"
+        "  --dry-run  only logs and disarms; nothing crashes.\n"
+        "  --warn     pop a topmost message box at the limit, then disarm.\n"
+        "\n"
         "seconds accept a plain number or a suffix: 30, 90s, 5m, 1h.\n"
-        "bugcheck code: 0x%08lX, raised through NtRaiseHardError.\n"
         "log file: %%LOCALAPPDATA%%\\keepMoving\\keepMoving.log\n",
         KM_VERSION_STR, (unsigned long)KM_BUGCHECK_CODE);
 }
@@ -99,7 +103,7 @@ int wmain(int argc, wchar_t **argv)
 
     if (arg_is(argv[1], L"start")) {
         DWORD interval = 0;
-        int   dry_run = 0;
+        int   mode = KM_MODE_CRASH;
         int   quiet = 0;
         int   i;
 
@@ -113,7 +117,9 @@ int wmain(int argc, wchar_t **argv)
 
         for (i = 3; i < argc; ++i) {
             if (arg_is(argv[i], L"--dry-run"))
-                dry_run = 1;
+                mode = KM_MODE_DRY;
+            else if (arg_is(argv[i], L"--warn"))
+                mode = KM_MODE_WARN;
             else if (arg_is(argv[i], L"--quiet"))
                 quiet = 1;
             else {
@@ -122,7 +128,7 @@ int wmain(int argc, wchar_t **argv)
             }
         }
 
-        return km_cmd_start(interval, dry_run, quiet);
+        return km_cmd_start(interval, mode, quiet);
     }
 
     if (arg_is(argv[1], L"stop")) {
@@ -144,6 +150,7 @@ int wmain(int argc, wchar_t **argv)
     if (arg_is(argv[1], L"query") || arg_is(argv[1], L"status")) {
         int json = 0;
         int clear = 0;
+        int watch = 0;
         int i;
 
         for (i = 2; i < argc; ++i) {
@@ -151,18 +158,20 @@ int wmain(int argc, wchar_t **argv)
                 json = 1;
             else if (arg_is(argv[i], L"--clear"))
                 clear = 1;
+            else if (arg_is(argv[i], L"--watch"))
+                watch = 1;
             else {
                 printf("keepMoving: unknown option for query: %ls\n", argv[i]);
                 return KM_EXIT_USAGE;
             }
         }
 
-        return km_cmd_query(json, clear);
+        return km_cmd_query(json, clear, watch);
     }
 
     if (arg_is(argv[1], L"run")) {
         DWORD interval = 0;
-        int   dry_run = 0;
+        int   mode = KM_MODE_CRASH;
         int   i;
 
         if (argc < 3 || !parse_interval(argv[2], &interval)) {
@@ -172,14 +181,16 @@ int wmain(int argc, wchar_t **argv)
 
         for (i = 3; i < argc; ++i) {
             if (arg_is(argv[i], L"--dry-run"))
-                dry_run = 1;
+                mode = KM_MODE_DRY;
+            else if (arg_is(argv[i], L"--warn"))
+                mode = KM_MODE_WARN;
             else {
                 printf("keepMoving: unknown option for run: %ls\n", argv[i]);
                 return KM_EXIT_USAGE;
             }
         }
 
-        return km_cmd_run(interval, dry_run);
+        return km_cmd_run(interval, mode);
     }
 
     if (arg_is(argv[1], L"diag")) {
@@ -215,7 +226,7 @@ int wmain(int argc, wchar_t **argv)
      */
     if (arg_is(argv[1], L"__worker")) {
         DWORD interval = 0;
-        int   dry_run = 0;
+        int   mode = KM_MODE_CRASH;
         int   i;
 
         for (i = 2; i < argc; ++i) {
@@ -223,7 +234,9 @@ int wmain(int argc, wchar_t **argv)
                 if (!parse_interval(argv[++i], &interval))
                     return KM_EXIT_USAGE;
             } else if (arg_is(argv[i], L"--dry-run")) {
-                dry_run = 1;
+                mode = KM_MODE_DRY;
+            } else if (arg_is(argv[i], L"--warn")) {
+                mode = KM_MODE_WARN;
             } else {
                 return KM_EXIT_USAGE;
             }
@@ -232,7 +245,7 @@ int wmain(int argc, wchar_t **argv)
         if (interval == 0)
             return KM_EXIT_USAGE;
 
-        return km_worker_core(interval, dry_run, FALSE);
+        return km_worker_core(interval, mode, FALSE);
     }
 
     printf("keepMoving: unknown command: %ls\n\n", argv[1]);

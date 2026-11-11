@@ -55,6 +55,7 @@ BOOL km_state_write(const km_paths *p, const km_state *st)
     fprintf(f, "pid=%lu\n", (unsigned long)st->pid);
     fprintf(f, "interval=%lu\n", (unsigned long)st->interval);
     fprintf(f, "dry_run=%d\n", st->dry_run);
+    fprintf(f, "warn_run=%d\n", st->warn_run);
     fprintf(f, "proc_create=%llu\n", (unsigned long long)st->proc_create);
     fprintf(f, "written=%s\n", now);
 
@@ -98,6 +99,8 @@ BOOL km_state_read(const km_paths *p, km_state *st)
             st->interval = (DWORD)v;
         } else if (kv_u64(line, "dry_run", &v)) {
             st->dry_run = (int)(v != 0);
+        } else if (kv_u64(line, "warn_run", &v)) {
+            st->warn_run = (int)(v != 0);
         } else if (kv_u64(line, "proc_create", &v)) {
             st->proc_create = v;
         }

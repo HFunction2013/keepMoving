@@ -64,6 +64,14 @@ Invoke-Case "stop" @("stop")
 Start-Sleep -Seconds 1
 Invoke-Case "query after stop" @("query")
 
+# warn mode: arm it, prove query reports the mode, then stop well before the
+# 120 s idle limit, so the MessageBox never actually appears on the runner.
+Invoke-Case "start 120 --warn" @("start", "120", "--warn")
+Start-Sleep -Seconds 2
+Invoke-Case "query (warn mode)" @("query")
+Invoke-Case "stop warn" @("stop")
+Start-Sleep -Seconds 1
+
 $state = Join-Path $env:LOCALAPPDATA "keepMoving\state.ini"
 Write-Host ""
 if (Test-Path -LiteralPath $state) {

@@ -48,6 +48,11 @@
 #define KM_EXIT_NO_INPUT_WATCH   5
 #define KM_EXIT_CRASH_CALL_FAIL  7
 
+/* Watchdog behaviour when the idle limit is reached. */
+#define KM_MODE_CRASH 0   /* bugcheck the machine (NtRaiseHardError) */
+#define KM_MODE_DRY   1   /* log and disarm, no crash, no dialog */
+#define KM_MODE_WARN  2   /* pop a topmost message box, then disarm */
+
 /* ------------------------------------------------------------------ paths */
 typedef struct km_paths_s {
     wchar_t dir[MAX_PATH];
@@ -64,6 +69,7 @@ typedef struct km_state_s {
     DWORD     pid;
     DWORD     interval;
     int       dry_run;
+    int       warn_run;
     ULONGLONG proc_create;   /* creation timestamp of the worker process */
 } km_state;
 
@@ -115,12 +121,12 @@ int   km_raise_hard_error(ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3,
                           ULONG_PTR a4, char *err, size_t cap);
 
 /* worker.c */
-int   km_worker_core(DWORD interval, int dry_run, BOOL console);
-int   km_cmd_start(DWORD interval, int dry_run, int quiet);
+int   km_worker_core(DWORD interval, int mode, BOOL console);
+int   km_cmd_start(DWORD interval, int mode, int quiet);
 int   km_cmd_stop(int force);
-int   km_cmd_query(int as_json, int clear_crash);
+int   km_cmd_query(int as_json, int clear_crash, int watch);
 int   km_cmd_diag(void);
-int   km_cmd_run(DWORD interval, int dry_run);
+int   km_cmd_run(DWORD interval, int mode);
 int   km_cmd_crash(void);
 
 #endif /* KM_H */

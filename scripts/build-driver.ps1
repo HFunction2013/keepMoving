@@ -56,8 +56,16 @@ $outDir = Split-Path -Parent $Out
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Force $outDir | Out-Null }
 $obj = Join-Path $outDir "kmbugcheck.obj"
 
-$env:INCLUDE = "$kmInc;$crtInc;$shInc"
-$env:LIB = $kmLib
+# Prepend the WDK km/shared/crt paths but keep the MSVC compiler headers and
+# the original SDK entries: kernel headers pull in excpt.h/stdarg.h from the
+# VC tools include, which would be lost if INCLUDE were overwritten outright.
+$extraInc = @($kmInc, $shInc)
+if (Test-Path $crtInc) { $extraInc += $crtInc }
+$origInc = @($env:INCLUDE -split ';' | Where-Object { $_ })
+$env:INCLUDE = (($extraInc + $origInc) -join ';')
+
+$origLib = @($env:LIB -split ';' | Where-Object { $_ })
+$env:LIB = (($kmLib + $origLib) -join ';')
 
 # Paths here are relative and contain no spaces; pass bare tokens so pwsh does
 # not leave literal double quotes in the cl/link command line.

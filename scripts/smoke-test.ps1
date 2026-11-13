@@ -42,13 +42,19 @@ Invoke-Case "version" @("version")
 Invoke-Case "help" @("help")
 Invoke-Case "diag" @("diag")
 
-# 120 s of idle limit, dry run: the worker arms itself and logs, but the
+# A long idle limit: the CI runner itself may have been idle for minutes, so a
+# 120 s limit would already be exceeded at startup and the worker would disarm
+# immediately.  3600 s keeps the watchdog armed long enough to prove the detached
+# worker, state file and query path; stop() then tears it down before the limit.
+$Limit = "3600"
+
+# 3600 s of idle limit, dry run: the worker arms itself and logs, but the
 # machine is never asked to bugcheck.
-Invoke-Case "start 120 --dry-run" @("start", "120", "--dry-run")
+Invoke-Case "start $Limit --dry-run" @("start", $Limit, "--dry-run")
 Start-Sleep -Seconds 2
 Invoke-Case "query" @("query")
 Invoke-Case "query --json" @("query", "--json")
-Invoke-Case "start again (should refuse)" @("start", "120", "--dry-run")
+Invoke-Case "start again (should refuse)" @("start", $Limit, "--dry-run")
 
 $log = Join-Path $env:LOCALAPPDATA "keepMoving\keepMoving.log"
 if (Test-Path -LiteralPath $log) {
@@ -65,8 +71,8 @@ Start-Sleep -Seconds 1
 Invoke-Case "query after stop" @("query")
 
 # warn mode: arm it, prove query reports the mode, then stop well before the
-# 120 s idle limit, so the MessageBox never actually appears on the runner.
-Invoke-Case "start 120 --warn" @("start", "120", "--warn")
+# idle limit, so the MessageBox never actually appears on the runner.
+Invoke-Case "start $Limit --warn" @("start", $Limit, "--warn")
 Start-Sleep -Seconds 2
 Invoke-Case "query (warn mode)" @("query")
 Invoke-Case "stop warn" @("stop")

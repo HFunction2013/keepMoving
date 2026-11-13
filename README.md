@@ -1,13 +1,24 @@
 # keepMoving
 
 A watchdog that actually makes you move the mouse: if the keyboard and mouse
-stay idle for the number of seconds you specify, it raises a bugcheck via
-`NtRaiseHardError` with the stop code fixed at **0xABCDEF12**.
+stay idle for the number of seconds you specify, it raises a bugcheck with the
+stop code fixed at **0xABCDEF12**.
 
-Pure user mode, MSVC-built, CLI, `start` returns immediately without blocking
-your terminal, logs go to a file instead of flooding the console, and — hard
-design constraint — it **changes no system settings** (no screensaver, no
-registry, no power policy).
+v2.0.0 has two crash paths:
+
+- **Kernel driver (x64, primary):** a minimal WDK driver calls
+  `KeBugCheckEx(0xABCDEF12, ...)` directly in kernel mode.  It is loaded through
+  the vendored [GDRVLoader](https://github.com/zer0condition/gdrvloader)
+  unsigned-driver bypass.
+- **User mode (fallback, all arches):** `NtRaiseHardError` with
+  `OptionShutdownSystem`.  Kept because on some machines the kernel path is
+  blocked (vulnerable-driver blocklist, HVCI, unsupported build); the watchdog
+  falls back to it automatically.
+
+MSVC-built CLI, `start` returns immediately without blocking your terminal,
+logs go to a file instead of flooding the console.  The watchdog itself does
+not touch the screensaver, power policy, or display settings; the driver loader
+writes only temporary service keys that it cleans up itself.
 
 ```
 keepMoving start 300         # bugcheck after 5 minutes of no mouse/keyboard
@@ -62,6 +73,37 @@ If on a real machine this API is genuinely unavailable, the program chooses to
 section 7.
 
 ## 2. How the bugcheck is raised
+
+### 2.1 Kernel driver (x64, primary)
+
+`driver/kmbugcheck.c` is a minimal legacy NT driver. Its `DriverEntry` calls:
+
+```c
+KeBugCheckEx(0xABCDEF12, 0, 0, 0, 0x4B4D5645);  /* tag "KMVE" */
+```
+
+`KeBugCheckEx` does not return; the machine stops immediately in kernel mode,
+which does not depend on the user-mode hard-error path behaving correctly.
+
+The driver is unsigned (no EV certificate in this build), so it cannot load on
+stock x64 Windows directly.  It is loaded through the vendored
+[GDRVLoader](https://github.com/zer0condition/gdrvloader) bypass (MIT, under
+`third_party/gdrvloader`): the loader drops the embedded vulnerable Gigabyte
+`gdrv.sys`, uses its arbitrary-memcpy IOCTL to briefly clear `g_CiOptions`,
+loads our driver through the service manager, restores `g_CiOptions`, then
+unloads and deletes the loader service.  Our own driver service key is removed
+after load.
+
+**Caveats you should know about:**
+
+- Modern Windows ships a **vulnerable-driver blocklist** (HVCI / Microsoft
+  recommended block rules) that blocks many known vulnerable drivers, including
+  the Gigabyte GIO target.  On an updated, hardened machine the bypass will
+  fail; the watchdog logs the NTSTATUS and falls back to the user-mode path.
+- The bypass needs an elevated token with `SeLoadDriverPrivilege`.
+- x86 builds ship **no** kernel driver; they use the user-mode path only.
+
+### 2.2 User mode (fallback, all arches)
 
 When the third "response option" argument of `ntdll!NtRaiseHardError` is
 `OptionShutdownSystem` (enum value 6, zero-based in `winnt.h`), the executive
@@ -176,7 +218,7 @@ the log loses its only evidence value.
 A full lifecycle looks roughly like this:
 
 ```
-2026-11-10 22:40:01.123 pid=18424 tid=19012 INFO  keepMoving worker starting, version 1.0.0
+2026-11-13 22:40:01.123 pid=18424 tid=19012 INFO  keepMoving worker starting, version 2.0.0
 2026-11-10 22:40:01.126 pid=18424 tid=19012 INFO  input source: GetLastInputInfo (user mode, no hooks, no driver)
 2026-11-10 22:40:01.130 pid=18424 tid=19012 INFO  watchdog armed, idle limit 300000 ms, poll interval 50 ms
 2026-11-10 22:40:31.132 pid=18424 tid=19012 INFO  heartbeat: idle 12.0 s, remaining 288.0 s, limit 300 s
@@ -195,44 +237,50 @@ interval, process creation time, dry-run / warn flags). Process creation time
 is cross-checked so a reused pid does not make us believe the old worker is
 still alive.
 
-## 5. Why not a kernel driver, and not a screensaver
+## 5. Design notes: driver, loader, screensaver
 
-The brief offered two alternatives; neither is taken, for these reasons.
+**Why a kernel driver at all**: on some machines `NtRaiseHardError` with
+`OptionShutdownSystem` returns without stopping the box. Calling
+`KeBugCheckEx` from our own driver is the deterministic stop path; it bypasses
+whatever made the user-mode call no-op.
 
-**Kernel driver**: to observe input, a driver would have to layer-filter
-`kbdclass`/`mouclass`, or register `PsSetLoadImageNotify` and poll
-`\Device\KeyboardClass0`. The price is signing (test-signing means
-`bcdedit /set testsigning on` — itself a boot-config change), IRQL/PnP/power
-handling, and unload races — one bug and you get an *unwanted* bugcheck. And
-the only capability it buys ("detect input on a machine with no interactive
-session") is meaningless here: nobody is sitting at the box, so there is
-nothing to time out.
+**Why a loader submodule instead of signing the driver**: no EV code-signing
+certificate is available for this build, and turning on test-signing is itself a
+boot-config change.  The vendored GDRVLoader bypass loads the unsigned driver
+through a window where DSE is briefly disabled, then restores it.  Upstream is
+MIT-licensed and stays in `third_party/gdrvloader` untouched; only a thin
+`src/gdrv_bridge.cpp` extern-"C" wrapper is added.
 
-**Screensaver path**: renaming the exe to `.scr` and pointing `SCRNSAVE.EXE`
-at it does get launched when the system thinks it is idle. But it changes
-system settings (directly against the constraint), only gives you the system's
-own idle judgement (granularity 1 minute, lives in the power plan), and the
-screensaver exits on any keypress — its lifetime is out of your control and
-something would have to relaunch it. As a trigger it is less clean than one
-`start`.
+**Why not a screensaver**: renaming the exe to `.scr` and pointing
+`SCRNSAVE.EXE` at it does get launched when the system thinks it is idle, but
+it changes system settings, only gives you the system's own idle judgement
+(granularity 1 minute, lives in the power plan), and the screensaver exits on
+any keypress — its lifetime is out of your control.  As a trigger it is less
+clean than one `start`.
 
-So the main path is `GetLastInputInfo` polling: 0 drivers, 0 registry writes,
-0 system-setting changes.
+**Input detection** still uses `GetLastInputInfo` polling: the driver only
+raises the bugcheck; it does not observe input.
 
 ## 6. Building
 
-Artifacts are built by GitHub Actions on `windows-latest` with MSVC; nothing is
-compiled locally:
+Artifacts are built by GitHub Actions on `windows-latest` (WDK 10.1.26100
+preinstalled); nothing is compiled locally:
 
 ```powershell
-# equivalent of what the runner actually runs
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # MSVC env already loaded via ilammy/msvc-dev-cmd
+# 1) x64 only: build the kernel driver with the WDK
+./scripts/build-driver.ps1 -Source driver/kmbugcheck.c -Out build/kmbugcheck.sys
+# 2) embed the driver blob into src/sys_bytes.h
+./scripts/gen-sys-header.ps1 -Out src/sys_bytes.h -Sys build/kmbugcheck.sys
+# 3) build the exe matrix
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-- Matrix: `x64` + `x86`, producing `keepMoving-x64.exe` / `keepMoving-x86.exe`.
+- Matrix: `x64` + `x86`.  The kernel driver and loader are x64-only; the x86
+  exe ships the user-mode fallback only.
 - CRT statically linked (`/MT`); target machines need no VC++ runtime.
-- Only `user32` and `advapi32`; no third-party libraries.
+- Exe links `user32`, `advapi32`, and (x64) `shlwapi`; the loader sources come
+  from the vendored submodule.
 - CI runs a `--dry-run` smoke test: `version` / `diag` / `start 120 --dry-run`
   / `query` / a duplicate `start` (must be rejected) / `stop` / `query` again,
   plus a `start 120 --warn` that is stopped before the dialog fires.
@@ -252,9 +300,8 @@ container without an interactive window station. Options:
    `GetLastInputInfo`. Still pure user mode, still no system changes — but it
    only works in a process with a window station, so it cannot rescue case 1.
    Not built into this version; the hook is left in `input.c`.
-3. **Kernel driver**: only worth it if you truly must detect real hardware
-   input in a non-interactive session (signing, WDK, bugcheck risk). See
-   section 5.
+3. **Kernel driver**: shipped in v2.0.0 (x64) to raise the bugcheck in kernel
+   mode; it does not observe input. See section 2 and 5.
 4. **Screensaver**: it changes system settings; not recommended.
 
 ## 8. Layout
@@ -263,22 +310,31 @@ container without an interactive window station. Options:
 keepMoving/
 ├─ CMakeLists.txt
 ├─ README.md
-├─ .github/workflows/build.yml     # windows-latest + MSVC + Ninja matrix build
-├─ scripts/smoke-test.ps1          # dry-run-only smoke test
+├─ .github/workflows/build.yml     # windows-latest + WDK/MSVC + Ninja matrix build
+├─ driver/kmbugcheck.c              # KeBugCheckEx kernel driver (x64)
+├─ scripts/
+│  ├─ build-driver.ps1             # WDK cl/link build of kmbugcheck.sys
+│  ├─ gen-sys-header.ps1           # embed the .sys blob into sys_bytes.h
+│  └─ smoke-test.ps1               # dry-run-only smoke test
+├─ third_party/gdrvloader/          # vendored MIT unsigned-driver loader (submodule)
 └─ src/
-   ├─ km.h          # shared declarations, constants, exit codes
-   ├─ main.c        # wmain: command parsing and dispatch
-   ├─ worker.c      # watchdog loop, start/stop/query/diag/crash
-   ├─ input.c       # GetLastInputInfo wrapper
-   ├─ bsod.c        # privilege enablement + NtRaiseHardError
-   ├─ state.c       # state.ini and last-crash.txt
-   ├─ log.c         # timestamped/pid/tid file logging
-   └─ util.c        # paths, process liveness, error formatting
+   ├─ km.h             # shared declarations, constants, exit codes
+   ├─ main.c           # wmain: command parsing and dispatch
+   ├─ worker.c         # watchdog loop, start/stop/query/diag/crash
+   ├─ input.c         # GetLastInputInfo wrapper
+   ├─ bsod.c           # privilege enablement + NtRaiseHardError
+   ├─ driver_launch.c  # x64 driver load path through the GDRVLoader bridge
+   ├─ gdrv_bridge.cpp # extern "C" wrapper around the vendored loader
+   ├─ state.c         # state.ini and last-crash.txt
+   ├─ log.c           # timestamped/pid/tid file logging
+   └─ util.c          # paths, process liveness, error formatting
 ```
 
 ## 9. Risk, in one line
 
 This program's job is to stop the machine when you stop touching it. It does
-exactly that, and by design pollutes nothing: it writes three files under its
-own directory, calls one read-only API, and changes no system setting. But a
-bugcheck does destroy unsaved work — run `--dry-run` first, then `start 5m`.
+exactly that, and by design pollutes nothing: it writes files under its own
+directory, calls one read-only input API, and leaves screensaver/power/display
+settings alone. The driver loader writes only temporary service keys it removes
+itself. But a bugcheck does destroy unsaved work — run `--dry-run` first, then
+`start 5m`.

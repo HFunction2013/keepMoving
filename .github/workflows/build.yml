@@ -20,11 +20,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Set up MSVC toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.arch }}
+
+      - name: Build kernel driver (x64)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: ./scripts/build-driver.ps1 -Source driver/kmbugcheck.c -Out build/kmbugcheck.sys
+
+      - name: Embed driver blob into sys_bytes.h (x64)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: ./scripts/gen-sys-header.ps1 -Out src/sys_bytes.h -Sys build/kmbugcheck.sys
+
+      - name: Regenerate empty sys_bytes.h stub (x86)
+        if: matrix.arch == 'x86'
+        shell: pwsh
+        run: ./scripts/gen-sys-header.ps1 -Out src/sys_bytes.h
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -42,6 +59,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item build/keepMoving.exe "dist/keepMoving-${{ matrix.arch }}.exe"
+          if (Test-Path build/kmbugcheck.sys) {
+            Copy-Item build/kmbugcheck.sys "dist/kmbugcheck-${{ matrix.arch }}.sys"
+          }
           Copy-Item README.md dist/README.md
 
       - name: Upload artifact

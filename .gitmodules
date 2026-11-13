@@ -1,0 +1,3 @@
+[submodule "third_party/gdrvloader"]
+	path = third_party/gdrvloader
+	url = https://github.com/zer0condition/gdrvloader.git

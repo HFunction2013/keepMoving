@@ -19,7 +19,7 @@
 #include <wchar.h>
 #include <strsafe.h>
 
-#define KM_VERSION_STR "1.0.0"
+#define KM_VERSION_STR "2.0.0"
 #define KM_APP_NAME    L"keepMoving"
 
 /* Bugcheck code that will be shown on the blue screen. */
@@ -119,6 +119,9 @@ ULONGLONG km_input_idle_ms(void);
 BOOL  km_enable_privilege(const wchar_t *name, BOOL *held, char *err, size_t cap);
 int   km_raise_hard_error(ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3,
                           ULONG_PTR a4, char *err, size_t cap);
+
+/* driver_launch.c (x64 kernel-driver path) */
+int   km_driver_launch(const km_paths *paths);
 
 /* worker.c */
 int   km_worker_core(DWORD interval, int mode, BOOL console);

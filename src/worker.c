@@ -287,6 +287,15 @@ int km_worker_core(DWORD interval, int mode, BOOL console)
             if (crash_retry_until != 0 && now64 < crash_retry_until) {
                 /* cooling down after a failed crash attempt */
             } else {
+#ifdef _WIN64
+                int dr = km_driver_launch(&paths);
+                if (dr == KM_EXIT_OK)
+                    KM_WARN("driver returned without stopping the machine; "
+                            "trying user-mode bugcheck");
+                else
+                    KM_WARN("kernel driver launch failed; falling back to "
+                            "NtRaiseHardError");
+#endif
                 rc = km_try_crash(interval, (DWORD)idle, limit_ms);
                 crash_retry_until = now64 + KM_CRASH_RETRY_MS;
                 rc = KM_EXIT_OK;
@@ -829,6 +838,16 @@ int km_cmd_crash(void)
     }
 
     km_log_open(paths.log, paths.log_old);
+
+#ifdef _WIN64
+    {
+        int dr = km_driver_launch(&paths);
+        if (dr == KM_EXIT_OK)
+            KM_INFO("driver loaded; DriverEntry should have raised the bugcheck");
+        else
+            KM_WARN("driver launch failed; falling back to NtRaiseHardError");
+    }
+#endif
 
     KM_WARN("manual crash requested, raising NtRaiseHardError(0x%08lX) now",
             (unsigned long)KM_BUGCHECK_CODE);

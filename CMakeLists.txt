@@ -58,6 +58,7 @@ endif()
 target_link_libraries(keepMoving PRIVATE user32 advapi32)
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    # SHDeleteKeyW used by the vendored loader service cleanup.
-    target_link_libraries(keepMoving PRIVATE shlwapi)
+    # SHDeleteKeyW used by the vendored loader service cleanup; ntdll for the
+    # NTAPI exports the loader declares via utils/ntdll.h.
+    target_link_libraries(keepMoving PRIVATE shlwapi ntdll)
 endif()

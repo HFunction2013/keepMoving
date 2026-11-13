@@ -22,17 +22,31 @@ if (-not (Test-Path $kitsRoot)) {
     throw "Windows Kits root not found: $kitsRoot"
 }
 
-$incDir = Get-ChildItem "$kitsRoot\Include" -Directory |
+# Pick the Include version dir that actually ships the kernel headers; the
+# highest-numbered SDK dir may only carry user-mode headers.
+$candidates = Get-ChildItem "$kitsRoot\Include" -Directory |
     Where-Object { $_.Name -match '^10\.0\.\d+\.0$' } |
-    Sort-Object Name -Descending |
-    Select-Object -First 1
-if (-not $incDir) { throw "No WDK Include version directory found" }
+    Sort-Object Name -Descending
+
+$incDir = $null
+foreach ($d in $candidates) {
+    if (Test-Path (Join-Path $d.FullName "km\ntddk.h")) { $incDir = $d; break }
+}
+if (-not $incDir) {
+    Write-Host "Include candidates:"
+    $candidates | ForEach-Object { Write-Host "  $($_.FullName)" }
+    throw "WDK kernel headers (km\ntddk.h) not found under $kitsRoot"
+}
 
 $sdkVer = $incDir.Name
 $kmInc  = Join-Path $incDir.FullName "km"
 $crtInc = Join-Path $incDir.FullName "crt"
 $shInc  = Join-Path $incDir.FullName "shared"
 $kmLib  = Join-Path $kitsRoot "Lib\$sdkVer\km\x64"
+
+if (-not (Test-Path $kmLib)) {
+    throw "WDK kernel lib dir not found: $kmLib"
+}
 
 Write-Host "WDK SDK version : $sdkVer"
 Write-Host "km include      : $kmInc"

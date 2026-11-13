@@ -28,6 +28,12 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
+      - name: Probe WDK layout (x64)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/probe-wdk.ps1
+
       - name: Build kernel driver (x64)
         if: matrix.arch == 'x64'
         shell: pwsh

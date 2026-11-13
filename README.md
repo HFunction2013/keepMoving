@@ -263,8 +263,10 @@ raises the bugcheck; it does not observe input.
 
 ## 6. Building
 
-Artifacts are built by GitHub Actions on `windows-latest` (WDK 10.1.26100
-preinstalled); nothing is compiled locally:
+Artifacts are built by GitHub Actions on `windows-latest`.  The image ships the
+DriverKit VS extension but not the km headers/lib payload, so the x64 job first
+installs the matching WDK 26100 (`scripts/install-wdk.ps1`) before compiling the
+driver; nothing is compiled locally:
 
 ```powershell
 # 1) x64 only: build the kernel driver with the WDK

@@ -7,5 +7,4 @@
 #include <stddef.h>
 
 static const unsigned char kmbugcheck_sys[] = { 0 };
-static const unsigned int kmbugcheck_sys_len =
-    (unsigned int)sizeof(kmbugcheck_sys);
+static const unsigned int kmbugcheck_sys_len = 0;

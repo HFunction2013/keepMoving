@@ -26,6 +26,7 @@ $sb = New-Object System.Text.StringBuilder
 
 if ($bytes.Count -eq 0) {
     [void]$sb.AppendLine("static const unsigned char kmbugcheck_sys[] = { 0 };")
+    [void]$sb.AppendLine("static const unsigned int kmbugcheck_sys_len = 0;")
 } else {
     [void]$sb.AppendLine("static const unsigned char kmbugcheck_sys[] = {")
     for ($i = 0; $i -lt $bytes.Count; $i += 16) {
@@ -34,9 +35,9 @@ if ($bytes.Count -eq 0) {
         [void]$sb.AppendLine("    $line,")
     }
     [void]$sb.AppendLine("};")
+    [void]$sb.AppendLine("static const unsigned int kmbugcheck_sys_len =")
+    [void]$sb.AppendLine("    (unsigned int)sizeof(kmbugcheck_sys);")
 }
-[void]$sb.AppendLine("static const unsigned int kmbugcheck_sys_len =")
-[void]$sb.AppendLine("    (unsigned int)sizeof(kmbugcheck_sys);")
 
 $outDir = Split-Path -Parent $Out
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Force $outDir | Out-Null }

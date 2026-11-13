@@ -67,6 +67,9 @@ $env:INCLUDE = (($extraInc + $origInc) -join ';')
 $origLib = @($env:LIB -split ';' | Where-Object { $_ })
 $env:LIB = (($kmLib + $origLib) -join ';')
 
+$ntoskrnl = Join-Path $kmLib "ntoskrnl.lib"
+if (-not (Test-Path $ntoskrnl)) { throw "ntoskrnl.lib not found: $ntoskrnl" }
+
 # Paths here are relative and contain no spaces; pass bare tokens so pwsh does
 # not leave literal double quotes in the cl/link command line.
 & cl /nologo /c /kernel /GS- /Gy /W3 `
@@ -75,7 +78,7 @@ $env:LIB = (($kmLib + $origLib) -join ';')
 if ($LASTEXITCODE -ne 0) { throw "cl failed with $LASTEXITCODE" }
 
 & link /NOLOGO /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry `
-    /MACHINE:X64 /NODEFAULTLIB $obj /OUT:$Out ntoskrnl.lib
+    /MACHINE:X64 /NODEFAULTLIB /LIBPATH:$kmLib $obj /OUT:$Out $ntoskrnl
 if ($LASTEXITCODE -ne 0) { throw "link failed with $LASTEXITCODE" }
 
 if (-not (Test-Path $Out)) { throw "driver output missing: $Out" }
